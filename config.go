@@ -28,16 +28,16 @@ type Config struct {
 // Endpoint is one named server in the config file.
 type Endpoint struct {
 	URL         string            `toml:"url"`
-	Key         string            `toml:"key"`
-	KeyEnv      string            `toml:"key_env"`
-	KeyFile     string            `toml:"key_file"`
-	KeyCmd      string            `toml:"key_cmd"`
-	Timeout     string            `toml:"timeout"`
-	Headers     map[string]string `toml:"headers"`
-	CAFile      string            `toml:"ca_file"`
-	Insecure    bool              `toml:"insecure"`
-	Concurrency int               `toml:"concurrency"`
-	Threshold   *float64          `toml:"threshold"`
+	Key         string            `toml:"key,omitempty"`
+	KeyEnv      string            `toml:"key_env,omitempty"`
+	KeyFile     string            `toml:"key_file,omitempty"`
+	KeyCmd      string            `toml:"key_cmd,omitempty"`
+	Timeout     string            `toml:"timeout,omitempty"`
+	Headers     map[string]string `toml:"headers,omitempty"`
+	CAFile      string            `toml:"ca_file,omitempty"`
+	Insecure    bool              `toml:"insecure,omitempty"`
+	Concurrency int               `toml:"concurrency,omitempty"`
+	Threshold   *float64          `toml:"threshold,omitempty"`
 }
 
 // configDir respects SYSONE_CONFIG (a file path) and XDG_CONFIG_HOME.

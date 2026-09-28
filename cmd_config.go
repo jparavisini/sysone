@@ -112,7 +112,9 @@ func configInit() error {
 		}
 		fmt.Fprintf(stderr, "wrote %s\n", dst)
 	}
-	fmt.Fprintf(stderr, "next: sysone config set endpoints.default.url https://your-server\n")
+	if cfg, err := loadConfig(); err == nil && cfg.Endpoints[cfg.DefaultEndpoint].URL == "" {
+		fmt.Fprintf(stderr, "next: sysone config set endpoints.default.url https://your-server\n")
+	}
 	return nil
 }
 
