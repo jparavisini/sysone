@@ -88,6 +88,11 @@ func validateQuestion(id string, q Question) error {
 	}
 	switch q.Type {
 	case typeYesNo:
+		if q.Criteria != nil {
+			if _, ok := q.Criteria.(map[string]any); !ok {
+				return fmt.Errorf("question %q: yesno criteria must be an object such as {\"true\": \"...\", \"false\": \"...\"}", id)
+			}
+		}
 		return nil
 	case typeChoice:
 		opts, ok := q.Criteria.(map[string]any)

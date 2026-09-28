@@ -97,6 +97,7 @@ Global flags (accepted by every command, before or after positionals):
   -e, --endpoint NAME   endpoint from config (default: default_endpoint)
       --url URL         override the endpoint URL
       --key KEY         override the API key (prefer SYSONE_KEY or key_cmd)
+      --model NAME      model name sent in the request (endpoint "model" by default)
       --timeout DUR     request timeout, e.g. 30s
       --threshold P     abstain below this probability (default 0.9)
   -o, --output FORMAT   json | jsonl | text | tsv | value
@@ -104,7 +105,7 @@ Global flags (accepted by every command, before or after positionals):
       --raw             include the unmodified server answer under "raw"
   -v                    log requests to stderr (never the key)
 
-Environment: SYSONE_ENDPOINT, SYSONE_URL, SYSONE_KEY, SYSONE_TIMEOUT,
+Environment: SYSONE_ENDPOINT, SYSONE_URL, SYSONE_KEY, SYSONE_MODEL, SYSONE_TIMEOUT,
 SYSONE_THRESHOLD, SYSONE_CONFIG. Precedence: flags > env > config > defaults.
 
 Exit codes:
@@ -128,8 +129,11 @@ func run(args []string) int {
 		fmt.Fprint(stderr, rootUsage)
 		return exitUsage
 	}
-	cmd, rest := args[0], args[1:]
-	var err error
+	cmd, rest, err := splitCommand(args)
+	if err != nil {
+		fmt.Fprintf(stderr, "sysone: %v\n\n%s", err, rootUsage)
+		return exitUsage
+	}
 	switch cmd {
 	case "ask":
 		err = cmdAsk(rest)
@@ -158,6 +162,34 @@ func run(args []string) int {
 		return exitUsage
 	}
 	return exitCode(err)
+}
+
+// splitCommand finds the subcommand when global flags precede it
+// (`sysone -e prod ask ...`) and hands those flags to the subcommand.
+func splitCommand(args []string) (cmd string, rest []string, err error) {
+	switch args[0] {
+	case "--version", "-h", "--help":
+		return args[0], args[1:], nil
+	}
+	if !strings.HasPrefix(args[0], "-") {
+		return args[0], args[1:], nil
+	}
+	var g globalFlags
+	fs := flag.NewFlagSet("sysone", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	g.register(fs)
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return "help", nil, nil
+		}
+		return "", nil, err
+	}
+	after := fs.Args()
+	if len(after) == 0 {
+		return "", nil, errors.New("no command given")
+	}
+	leading := args[:len(args)-len(after)]
+	return after[0], append(append([]string{}, leading...), after[1:]...), nil
 }
 
 func exitCode(err error) int {
@@ -212,6 +244,7 @@ type globalFlags struct {
 	endpoint  string
 	url       string
 	key       string
+	model     string
 	timeout   string
 	threshold float64
 	output    string
@@ -224,6 +257,7 @@ func (g *globalFlags) register(fs *flag.FlagSet) {
 	fs.StringVar(&g.endpoint, "endpoint", "", "endpoint name")
 	fs.StringVar(&g.url, "url", "", "endpoint URL")
 	fs.StringVar(&g.key, "key", "", "API key")
+	fs.StringVar(&g.model, "model", "", "model name sent in the request")
 	fs.StringVar(&g.timeout, "timeout", "", "request timeout")
 	fs.Float64Var(&g.threshold, "threshold", -1, "abstain threshold")
 	fs.StringVar(&g.output, "o", "", "output format")

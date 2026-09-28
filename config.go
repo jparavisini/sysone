@@ -17,6 +17,7 @@ import (
 const (
 	defaultTimeout   = 30 * time.Second
 	defaultThreshold = 0.9
+	defaultPath      = "/v1/systemone"
 )
 
 // Config is the on-disk shape of ~/.config/sysone/config.toml.
@@ -28,6 +29,8 @@ type Config struct {
 // Endpoint is one named server in the config file.
 type Endpoint struct {
 	URL         string            `toml:"url"`
+	Path        string            `toml:"path,omitempty"`
+	Model       string            `toml:"model,omitempty"`
 	Key         string            `toml:"key,omitempty"`
 	KeyEnv      string            `toml:"key_env,omitempty"`
 	KeyFile     string            `toml:"key_file,omitempty"`
@@ -90,6 +93,8 @@ func loadConfig() (*Config, error) {
 type Resolved struct {
 	Name        string
 	URL         string
+	Path        string
+	Model       string
 	Timeout     time.Duration
 	Headers     map[string]string
 	CAFile      string
@@ -137,6 +142,8 @@ func resolveWith(cfg *Config, g *globalFlags) (*Resolved, error) {
 	r := &Resolved{
 		Name:        name,
 		URL:         strings.TrimRight(first(g.url, getenv("SYSONE_URL"), ep.URL), "/"),
+		Path:        first(ep.Path, defaultPath),
+		Model:       first(g.model, getenv("SYSONE_MODEL"), ep.Model),
 		Headers:     ep.Headers,
 		CAFile:      ep.CAFile,
 		Insecure:    ep.Insecure,

@@ -52,10 +52,11 @@ type Answer struct {
 
 // Result is the answer set for one state.
 type Result struct {
-	Answers   []Answer `json:"answers"`
-	Abstain   bool     `json:"abstain"`
-	Model     string   `json:"model,omitempty"`
-	LatencyMS int64    `json:"latency_ms"`
+	Answers   []Answer        `json:"answers"`
+	Abstain   bool            `json:"abstain"`
+	Model     string          `json:"model,omitempty"`
+	LatencyMS int64           `json:"latency_ms"`
+	Usage     json.RawMessage `json:"usage,omitempty"`
 }
 
 // sleepFn is swapped out in tests so retries do not wait.
@@ -101,8 +102,9 @@ func newClient(ep *Resolved) (*Client, error) {
 
 const maxTries = 3
 
-// do performs one request with retries on connection errors, 503 and 5xx.
-// 4xx is never retried. Returns the body and status of the final attempt.
+// do performs one request with retries on connection errors, 429 and 5xx
+// (503, 529, ...). Other 4xx is never retried. Returns the body and status
+// of the final attempt.
 func (c *Client) do(ctx context.Context, method, path string, body []byte, auth bool) ([]byte, int, error) {
 	var lastErr error
 	for attempt := 1; attempt <= maxTries; attempt++ {
@@ -110,7 +112,7 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte, auth 
 			c.sleep(backoff(attempt, lastErr))
 		}
 		resp, status, retryAfter, err := c.once(ctx, method, path, body, auth, attempt)
-		if err == nil && status < 500 {
+		if err == nil && !retryable(status) {
 			return resp, status, nil
 		}
 		if err == nil {
@@ -125,7 +127,9 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte, auth 
 	return nil, 0, lastErr
 }
 
-// httpError is a 5xx response kept for retry decisions and final reporting.
+func retryable(status int) bool { return status == 429 || status >= 500 }
+
+// httpError is a retryable response kept for backoff and final reporting.
 type httpError struct {
 	status     int
 	retryAfter time.Duration
@@ -205,15 +209,23 @@ func parseRetryAfter(v string) time.Duration {
 	return 0
 }
 
-// serverMessage extracts {"error": "..."} or trims the body.
+// serverMessage extracts {"error": "..."}, {"error": {"message": "..."}}
+// or {"detail": ...}, else trims the body.
 func serverMessage(b []byte) string {
 	var e struct {
-		Error  string `json:"error"`
-		Detail any    `json:"detail"`
+		Error  json.RawMessage `json:"error"`
+		Detail any             `json:"detail"`
 	}
 	if json.Unmarshal(b, &e) == nil {
-		if e.Error != "" {
-			return e.Error
+		var msg string
+		var obj struct {
+			Message string `json:"message"`
+		}
+		if json.Unmarshal(e.Error, &msg) == nil && msg != "" {
+			return msg
+		}
+		if json.Unmarshal(e.Error, &obj) == nil && obj.Message != "" {
+			return obj.Message
 		}
 		if e.Detail != nil {
 			d, _ := json.Marshal(e.Detail)
@@ -255,17 +267,24 @@ func mapStatus(status int, body []byte, err error) error {
 	case status == 400 || status == 413 || status == 422:
 		return fail(exitBadInput, "server rejected the request (%d): %s", status, serverMessage(body))
 	case status == 404:
-		return fail(exitNetwork, "not found (404): the endpoint URL may be wrong or the path unsupported")
+		return fail(exitNetwork, "not found (404): check the endpoint url and path")
+	case status == 429:
+		return fail(exitNetwork, "rate limited (429): %s", serverMessage(body))
 	default:
 		return fail(exitNetwork, "server returned %d: %s", status, serverMessage(body))
 	}
 }
 
 // Health calls GET /health (no auth) and returns the raw JSON and latency.
+// Endpoints without /health (hosted APIs) get a one-question probe decision
+// instead, reported with "probe": true.
 func (c *Client) Health(ctx context.Context) (json.RawMessage, time.Duration, error) {
 	start := time.Now()
 	b, status, err := c.do(ctx, http.MethodGet, "/health", nil, false)
 	lat := time.Since(start)
+	if err == nil && (status == 404 || status == 405) {
+		return c.probe(ctx)
+	}
 	if e := mapStatus(status, b, err); e != nil {
 		return nil, lat, e
 	}
@@ -275,12 +294,30 @@ func (c *Client) Health(ctx context.Context) (json.RawMessage, time.Duration, er
 	return b, lat, nil
 }
 
+func (c *Client) probe(ctx context.Context) (json.RawMessage, time.Duration, error) {
+	start := time.Now()
+	res, err := c.Ask(ctx, "ping", []string{"ok"}, map[string]Question{"ok": {Type: typeYesNo, Instructions: "Is the state the word ping?"}})
+	lat := time.Since(start)
+	if err != nil {
+		return nil, lat, err
+	}
+	out := map[string]any{"probe": true, "ok": true}
+	if res.Model != "" {
+		out["model"] = res.Model
+	}
+	if res.Usage != nil {
+		out["usage"] = res.Usage
+	}
+	b, _ := json.Marshal(out)
+	return b, lat, nil
+}
+
 // healthModelName fetches the model name from /health once per process.
 // Used only when the answer response carries no model field.
 func (c *Client) healthModelName(ctx context.Context) string {
 	c.healthOnce.Do(func() {
-		b, _, err := c.Health(ctx)
-		if err != nil {
+		b, status, err := c.do(ctx, http.MethodGet, "/health", nil, false)
+		if err != nil || status != 200 {
 			return
 		}
 		var h struct {
@@ -302,6 +339,9 @@ func (c *Client) Ask(ctx context.Context, state any, ids []string, qs map[string
 		switch q.Type {
 		case typeYesNo:
 			w["type"] = wireYesNo
+			if q.Criteria != nil {
+				w["criteria"] = q.Criteria
+			}
 		case typeChoice, typeScore:
 			w["type"] = q.Type
 			w["criteria"] = q.Criteria
@@ -310,13 +350,17 @@ func (c *Client) Ask(ctx context.Context, state any, ids []string, qs map[string
 		}
 		wire[id] = w
 	}
-	body, err := json.Marshal(map[string]any{"state": state, "questions": wire})
+	payload := map[string]any{"state": state, "questions": wire}
+	if c.ep.Model != "" {
+		payload["model"] = c.ep.Model
+	}
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, fail(exitBadInput, "encode request: %v", err)
 	}
 
 	start := time.Now()
-	b, status, err := c.do(ctx, http.MethodPost, "/v1/systemone", body, true)
+	b, status, err := c.do(ctx, http.MethodPost, c.ep.Path, body, true)
 	lat := time.Since(start).Milliseconds()
 	if e := mapStatus(status, b, err); e != nil {
 		return nil, e
@@ -331,7 +375,7 @@ func (c *Client) Ask(ctx context.Context, state any, ids []string, qs map[string
 		model = c.healthModelName(ctx)
 	}
 
-	res := &Result{Model: model, LatencyMS: lat}
+	res := &Result{Model: model, LatencyMS: lat, Usage: resp.Usage}
 	for _, id := range ids {
 		rawAns, ok := resp.Answers[id]
 		if !ok {
@@ -355,6 +399,7 @@ func (c *Client) Ask(ctx context.Context, state any, ids []string, qs map[string
 type wireResponse struct {
 	Answers map[string]json.RawMessage `json:"answers"`
 	Model   string                     `json:"model"`
+	Usage   json.RawMessage            `json:"usage"`
 }
 
 // wireAnswer is the union of every field a server might send for one answer.
@@ -397,22 +442,28 @@ func normalise(id string, q Question, raw json.RawMessage) (*Answer, error) {
 		a.P = pick(w.AnswerConfidence, lookup(w.Probabilities, label), nil)
 
 	case typeScore:
+		// Some servers send "score" as the integer level, others as the
+		// probability-weighted position (1.99). The level is the argmax of
+		// probabilities when present; a fractional score is kept as expected.
 		var idx int
-		switch {
-		case w.Score != nil:
-			n, err := w.Score.Int64()
+		var scoreF *float64
+		if w.Score != nil {
+			f, err := w.Score.Float64()
 			if err != nil {
-				f, ferr := w.Score.Float64()
-				if ferr != nil {
-					return nil, fail(exitNetwork, "answer %q: bad score %s", id, *w.Score)
-				}
-				n = int64(math.Round(f))
+				return nil, fail(exitNetwork, "answer %q: bad score %s", id, *w.Score)
 			}
-			idx = int(n)
+			scoreF = &f
+		}
+		switch {
 		case len(w.Probabilities) > 0:
 			idx, _ = strconv.Atoi(argmax(w.Probabilities))
+		case scoreF != nil:
+			idx = int(math.Round(*scoreF))
 		default:
 			return nil, fail(exitNetwork, "answer %q: no score or probabilities in response", id)
+		}
+		if a.Expected == nil && scoreF != nil && *scoreF != math.Trunc(*scoreF) {
+			a.Expected = scoreF
 		}
 		a.Answer = idx
 		a.P = pick(w.AnswerConfidence, lookup(w.Probabilities, strconv.Itoa(idx)), nil)

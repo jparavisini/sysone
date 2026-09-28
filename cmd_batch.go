@@ -230,6 +230,9 @@ func processLine(ctx context.Context, c *Client, qs *QuestionSet, rules []string
 	if res.Model != "" {
 		rec["model"] = res.Model
 	}
+	if res.Usage != nil {
+		rec["usage"] = res.Usage
+	}
 	if keep {
 		if input != nil {
 			rec["input"] = input

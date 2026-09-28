@@ -291,7 +291,9 @@ Usage:
   sysone health [-e ENDPOINT | --all]
 
 Calls GET /health (no auth) and prints latency plus whatever JSON the server
-returns (model, version, loaded, ...).
+returns (model, version, loaded, ...). When the endpoint has no /health (hosted
+APIs such as OpenRouter), it sends a one-question probe decision instead and
+reports {"probe": true, "model": ...}; that probe is billed like any request.
 
 Examples:
   sysone health

@@ -94,7 +94,7 @@ One answer, whatever the server returned:
 
 ### Global flags
 
-`-e/--endpoint NAME`, `--url`, `--key`, `--timeout DUR`, `--threshold P`, `-o FORMAT`, `--raw`, `-v` (log requests to stderr; never the key). They work before or after positionals.
+`-e/--endpoint NAME`, `--url`, `--key`, `--model NAME`, `--timeout DUR`, `--threshold P`, `-o FORMAT`, `--raw`, `-v` (log requests to stderr; never the key). They work before or after positionals.
 
 ## Exit codes
 
@@ -108,7 +108,7 @@ One answer, whatever the server returned:
 | 5 | network or server error (after retries) |
 | 6 | bad spec or input |
 
-Connection errors, 503 and other 5xx are retried up to 3 times with jittered backoff, honouring `Retry-After`. 4xx is never retried.
+Connection errors, 429, 503, 529 and other 5xx are retried up to 3 times with jittered backoff, honouring `Retry-After`. Other 4xx is never retried.
 
 ## Configuration
 
@@ -134,9 +134,37 @@ key_env = "SYSONE_STAGING_KEY"
 
 Auth, first one set wins: `--key`, `$SYSONE_KEY`, then the endpoint's `key`, `key_env`, `key_file` (warns when the file mode is looser than 0600), `key_cmd` (first line of stdout; run once per process). The key is never printed or logged, including by `config show` and `-v`.
 
-Environment: `SYSONE_ENDPOINT`, `SYSONE_URL`, `SYSONE_KEY`, `SYSONE_TIMEOUT`, `SYSONE_THRESHOLD`, `SYSONE_CONFIG`.
+Environment: `SYSONE_ENDPOINT`, `SYSONE_URL`, `SYSONE_KEY`, `SYSONE_MODEL`, `SYSONE_TIMEOUT`, `SYSONE_THRESHOLD`, `SYSONE_CONFIG`.
 
 With no config file at all, `SYSONE_URL` and `SYSONE_KEY` are enough.
+
+## Endpoints: local server, OpenRouter, TypeSafe
+
+Any server that speaks the System-1 wire protocol works. Hosted APIs need `model` in the request and use their own path; both are per-endpoint settings. Switch with `-e NAME`.
+
+```toml
+[endpoints.local]
+url = "http://sysone.internal:8080"
+key_cmd = "pass show sysone/local"
+
+[endpoints.openrouter]                  # Jev via OpenRouter, billed per input token
+url = "https://openrouter.ai/api"
+path = "/alpha/decisions"
+model = "typesafe/jev-1.13"             # or "~typesafe/jev-latest"
+key_env = "OPENROUTER_API_KEY"
+
+[endpoints.typesafe]                    # Jev direct
+url = "https://api.typesafe.ai"
+model = "jev-latest"
+key_env = "TYPESAFE_API_KEY"
+```
+
+```bash
+sysone -e openrouter ask -s ticket-triage < ticket.txt | jq '.usage.cost'
+sysone -e openrouter --model '~typesafe/jev-latest' gate "Is this spam?" < mail.eml
+```
+
+`path` defaults to `/v1/systemone`. `--model` and `SYSONE_MODEL` override the endpoint's `model`. Endpoints without `GET /health` get a one-question probe from `sysone health` instead. When the server reports `usage` (OpenRouter includes `cost` in USD) it passes through on `ask` and `batch` output.
 
 ## Specs
 
@@ -157,8 +185,8 @@ A spec is a reusable named question set in `~/.config/sysone/specs/NAME.json`, f
 ```
 
 - `choice`: `criteria` is an object of `label: description`. Write the descriptions; the model reads them. Keep it under 40 options and split hierarchically above that.
-- `yesno`: one clear question. (`noul` on the wire; the CLI accepts both.)
-- `score`: `criteria` is an ordered list of level descriptions; the answer is the index.
+- `yesno`: one clear question. (`noul` on the wire; the CLI accepts both.) An optional `criteria` object such as `{"true": "...", "false": "..."}` passes through.
+- `score`: `criteria` is an ordered list of level descriptions; the answer is the index of the most probable level. A fractional server score (the probability-weighted position) is kept as `expected`.
 - `rules`: optional list merged into the state under `rules`. A text state becomes `{"text": ..., "rules": [...]}`; a JSON object state gets a `rules` key.
 
 `-q FILE` accepts the same shape, or a bare question map. In `batch`, a per-line `"questions"` object overrides the spec for that line.

@@ -449,7 +449,7 @@ func answerServer(t *testing.T, yesP float64, choice string, choiceP float64) *h
 				return
 			}
 		}
-		json.NewEncoder(w).Encode(map[string]any{"answers": answers, "model": "m1"})
+		json.NewEncoder(w).Encode(map[string]any{"answers": answers, "model": "m1", "usage": map[string]any{"cost": 0.00001}})
 	}))
 }
 
@@ -579,6 +579,9 @@ func TestBatchOrderingUnderConcurrency(t *testing.T) {
 		if len(rec.Answers) != 1 || rec.Answers[0].Answer != true {
 			t.Errorf("line %d answers %+v", i, rec.Answers)
 		}
+	}
+	if !strings.Contains(lines[0], `"usage":{"cost":0.00001}`) {
+		t.Errorf("batch line should carry usage: %s", lines[0])
 	}
 	if !strings.Contains(lines[n], `"input":"a raw string line"`) {
 		t.Errorf("raw string line: %s", lines[n])
@@ -771,6 +774,27 @@ func TestHealth(t *testing.T) {
 	}
 }
 
+func TestGlobalFlagsBeforeCommand(t *testing.T) {
+	srv := answerServer(t, 0.95, "billing", 0.95)
+	defer srv.Close()
+	cfgPath := writeConfig(t, fmt.Sprintf("[endpoints.default]\nurl = \"http://127.0.0.1:1\"\n[endpoints.other]\nurl = %q\nkey = \"k\"\n", srv.URL))
+	env(t, map[string]string{"SYSONE_CONFIG": cfgPath})
+	noSleep(t)
+	out, errb := capture(t, "state", false)
+	if code := run([]string{"-e", "other", "--raw", "gate", "q", "-o", "value"}); code != 0 {
+		t.Fatalf("exit %d: %s", code, errb)
+	}
+	if out.String() != "yes\n" {
+		t.Errorf("stdout %q", out.String())
+	}
+	if code := run([]string{"--version"}); code != 0 {
+		t.Errorf("--version exit %d", code)
+	}
+	if code := run([]string{"-e"}); code != exitUsage {
+		t.Errorf("dangling flag exit %d", code)
+	}
+}
+
 func TestParseArgsInterspersed(t *testing.T) {
 	var g globalFlags
 	fs := newFlagSet("x", "")
@@ -778,5 +802,140 @@ func TestParseArgsInterspersed(t *testing.T) {
 	pos, err := parseArgs(fs, []string{"a", "-o", "value", "b", "--raw", "c"})
 	if err != nil || strings.Join(pos, ",") != "a,b,c" || g.output != "value" || !g.raw {
 		t.Errorf("pos=%v out=%q raw=%v err=%v", pos, g.output, g.raw, err)
+	}
+}
+
+// ------------------------------------------------------- hosted endpoints
+
+func TestHostedEndpointRequestShape(t *testing.T) {
+	var got struct {
+		Path  string
+		Body  map[string]any
+		Count int
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got.Count++
+		got.Path = r.URL.Path
+		json.NewDecoder(r.Body).Decode(&got.Body)
+		fmt.Fprint(w, `{"model":"typesafe/jev-1.13-20260917","answers":{
+			"is_bug":{"type":"noul","noul":0.96},
+			"team":{"type":"choice","choice":"payments","confidence":0.67,"probabilities":{"payments":0.78,"frontend":0.22,"account":0}},
+			"urgency":{"type":"score","score":1.99,"confidence":0.99,"probabilities":{"0":0,"1":0,"2":1},"legend":{"0":"a","1":"b","2":"c"}}},
+			"usage":{"input_tokens":476,"output_tokens":70,"cost":0.000019992}}`)
+	}))
+	defer srv.Close()
+	ep := testResolved(srv.URL)
+	ep.Path, ep.Model = "/alpha/decisions", "typesafe/jev-1.13"
+	c, _ := newClient(ep)
+	qs := map[string]Question{
+		"is_bug":  {Type: typeYesNo, Instructions: "bug?", Criteria: map[string]any{"true": "defect", "false": "question"}},
+		"team":    {Type: typeChoice, Instructions: "team?", Criteria: map[string]any{"payments": "p", "frontend": "f", "account": "a"}},
+		"urgency": {Type: typeScore, Instructions: "urgent?", Criteria: []any{"a", "b", "c"}},
+	}
+	res, err := c.Ask(context.Background(), map[string]any{"ticket": "x"}, []string{"is_bug", "team", "urgency"}, qs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Path != "/alpha/decisions" || got.Body["model"] != "typesafe/jev-1.13" {
+		t.Errorf("request path=%q model=%v", got.Path, got.Body["model"])
+	}
+	q := got.Body["questions"].(map[string]any)
+	if q["is_bug"].(map[string]any)["type"] != "noul" || q["is_bug"].(map[string]any)["criteria"] == nil {
+		t.Errorf("noul question on the wire: %v", q["is_bug"])
+	}
+	if got.Count != 1 {
+		t.Errorf("model came from the response, so no /health call expected; got %d requests", got.Count)
+	}
+	if res.Model != "typesafe/jev-1.13-20260917" || !strings.Contains(string(res.Usage), "cost") {
+		t.Errorf("model=%q usage=%s", res.Model, res.Usage)
+	}
+	bug, team, urg := res.Answers[0], res.Answers[1], res.Answers[2]
+	if bug.Answer != true || fmt.Sprintf("%.2f", bug.P) != "0.96" {
+		t.Errorf("noul: %+v", bug)
+	}
+	if team.Answer != "payments" || fmt.Sprintf("%.2f", team.P) != "0.78" {
+		t.Errorf("choice p must come from probabilities, not confidence: %+v", team)
+	}
+	if urg.Answer != 2 || urg.P != 1 || urg.Expected == nil || *urg.Expected != 1.99 {
+		t.Errorf("fractional score: %+v", urg)
+	}
+}
+
+func TestRetryOn429And529(t *testing.T) {
+	for _, first := range []int{429, 529} {
+		t.Run(fmt.Sprint(first), func(t *testing.T) {
+			noSleep(t)
+			var hits atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/health" {
+					fmt.Fprint(w, `{}`)
+					return
+				}
+				if hits.Add(1) == 1 {
+					w.WriteHeader(first)
+					fmt.Fprint(w, `{"error":{"code":429,"message":"Rate limit exceeded"}}`)
+					return
+				}
+				fmt.Fprint(w, `{"answers":{"q":{"noul":0.9}}}`)
+			}))
+			defer srv.Close()
+			c, _ := newClient(testResolved(srv.URL))
+			if _, err := c.Ask(context.Background(), "s", []string{"q"}, map[string]Question{"q": {Type: typeYesNo, Instructions: "?"}}); err != nil {
+				t.Fatal(err)
+			}
+			if hits.Load() != 2 {
+				t.Errorf("hits = %d, want 2", hits.Load())
+			}
+		})
+	}
+}
+
+func TestServerMessageShapes(t *testing.T) {
+	cases := map[string]string{
+		`{"error":"plain"}`:                          "plain",
+		`{"error":{"code":401,"message":"Missing"}}`: "Missing",
+		`{"detail":[{"loc":["body"]}]}`:              `[{"loc":["body"]}]`,
+		`not json`:                                   "not json",
+		``:                                           "(empty body)",
+	}
+	for in, want := range cases {
+		if got := serverMessage([]byte(in)); got != want {
+			t.Errorf("%s -> %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestHealthProbeWhenNoHealthEndpoint(t *testing.T) {
+	var probeBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" {
+			w.WriteHeader(404)
+			return
+		}
+		json.NewDecoder(r.Body).Decode(&probeBody)
+		fmt.Fprint(w, `{"model":"m-hosted","answers":{"ok":{"noul":0.99}},"usage":{"cost":0.00001}}`)
+	}))
+	defer srv.Close()
+	c, _ := newClient(testResolved(srv.URL))
+	b, _, err := c.Health(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var h map[string]any
+	json.Unmarshal(b, &h)
+	if h["probe"] != true || h["model"] != "m-hosted" || h["usage"] == nil {
+		t.Errorf("probe health: %s", b)
+	}
+	if len(probeBody["questions"].(map[string]any)) != 1 {
+		t.Errorf("probe should send exactly one question: %v", probeBody)
+	}
+}
+
+func TestYesNoCriteriaValidation(t *testing.T) {
+	if _, err := parseSpec([]byte(`{"a":{"type":"yesno","instructions":"?","criteria":{"true":"t","false":"f"}}}`), "x"); err != nil {
+		t.Errorf("object criteria should pass: %v", err)
+	}
+	if _, err := parseSpec([]byte(`{"a":{"type":"yesno","instructions":"?","criteria":["t","f"]}}`), "x"); err == nil {
+		t.Error("list criteria on yesno should fail")
 	}
 }

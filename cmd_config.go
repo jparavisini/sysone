@@ -31,9 +31,22 @@ Config file:
   timeout = "30s"
   threshold = 0.9
   concurrency = 4
+  # path = "/v1/systemone"                # request path under url
+  # model = ""                            # sent as "model" in the body when set
   # headers = { "X-Team" = "ops" }
   # ca_file = "~/.config/sysone/ca.pem"
   # insecure = false
+
+  [endpoints.openrouter]                  # Jev via OpenRouter
+  url = "https://openrouter.ai/api"
+  path = "/alpha/decisions"
+  model = "typesafe/jev-1.13"
+  key_env = "OPENROUTER_API_KEY"
+
+  [endpoints.typesafe]                    # Jev direct
+  url = "https://api.typesafe.ai"
+  model = "jev-latest"
+  key_env = "TYPESAFE_API_KEY"
 
 Auth, first one set wins: --key, $SYSONE_KEY, key, key_env, key_file, key_cmd.
 Location: $SYSONE_CONFIG, else $XDG_CONFIG_HOME/sysone/config.toml, else ~/.config/sysone/config.toml.
@@ -42,7 +55,10 @@ Examples:
   sysone config init
   sysone config set endpoints.default.url https://sysone.example.com
   sysone config set endpoints.default.key_cmd "op read op://Private/sysone/credential"
-  sysone config set endpoints.staging.url https://staging.example.com
+  sysone config set endpoints.openrouter.url https://openrouter.ai/api
+  sysone config set endpoints.openrouter.path /alpha/decisions
+  sysone config set endpoints.openrouter.model typesafe/jev-1.13
+  sysone config set endpoints.openrouter.key_env OPENROUTER_API_KEY
 `
 
 const configTemplate = `# sysone configuration. See: sysone config --help
@@ -55,6 +71,15 @@ url = ""
 timeout = "30s"
 threshold = 0.9
 concurrency = 4
+# path = "/v1/systemone"   # request path under url
+# model = ""               # sent in the request body when set (hosted APIs need it)
+
+# Jev via OpenRouter:
+# [endpoints.openrouter]
+# url = "https://openrouter.ai/api"
+# path = "/alpha/decisions"
+# model = "typesafe/jev-1.13"
+# key_env = "OPENROUTER_API_KEY"
 `
 
 func cmdConfig(args []string) error {
