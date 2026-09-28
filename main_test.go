@@ -403,13 +403,14 @@ func TestConfigSetRoundTrip(t *testing.T) {
 	capture(t, "", false)
 	run([]string{"config", "set", "endpoints.default.url", "http://one"})
 	run([]string{"config", "set", "endpoints.default.threshold", "0.8"})
-	run([]string{"config", "set", "endpoints.default.concurrency", "6"})
+	run([]string{"config", "set", "endpoints.default.concurrency", "1"})
+	run([]string{"config", "set", "endpoints.default.insecure", "true"})
 	cfg, err := loadConfig()
 	if err != nil {
 		t.Fatal(err)
 	}
 	ep := cfg.Endpoints["default"]
-	if ep.URL != "http://one" || ep.Threshold == nil || *ep.Threshold != 0.8 || ep.Concurrency != 6 {
+	if ep.URL != "http://one" || ep.Threshold == nil || *ep.Threshold != 0.8 || ep.Concurrency != 1 || !ep.Insecure {
 		t.Errorf("got %+v", ep)
 	}
 }

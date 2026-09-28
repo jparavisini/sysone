@@ -220,8 +220,11 @@ func configSet(key, value string) error {
 
 // tomlValue turns "true", "0.9", "4" into typed values; everything else is a string.
 func tomlValue(v string) any {
-	if b, err := strconv.ParseBool(v); err == nil {
-		return b
+	switch v {
+	case "true":
+		return true
+	case "false":
+		return false
 	}
 	if n, err := strconv.ParseInt(v, 10, 64); err == nil {
 		return n
