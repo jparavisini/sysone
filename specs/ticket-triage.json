@@ -1,0 +1,29 @@
+{
+  "description": "Route and prioritise a support ticket",
+  "rules": [
+    "Anything mentioning a chargeback, refund or invoice goes to billing, even if it also describes a bug.",
+    "Data loss or a security concern is always fully blocking."
+  ],
+  "questions": {
+    "team": {
+      "type": "choice",
+      "instructions": "Which team should own this ticket?",
+      "criteria": {
+        "billing": "invoices, refunds, chargebacks, payment methods, plan changes",
+        "tech": "bugs, errors, outages, performance, integrations, API",
+        "account": "login, password, profile, permissions, team members",
+        "sales": "pricing questions before purchase, demos, enterprise contracts",
+        "other": "anything not covered above"
+      }
+    },
+    "urgent": {
+      "type": "yesno",
+      "instructions": "Does this ticket need a response within the hour?"
+    },
+    "blocked": {
+      "type": "score",
+      "instructions": "How much is the customer blocked from using the product?",
+      "criteria": ["not blocked, a question or request", "workaround exists", "fully blocked"]
+    }
+  }
+}

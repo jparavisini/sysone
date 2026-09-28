@@ -1,0 +1,23 @@
+{
+  "description": "Sentiment and tone of a short text",
+  "questions": {
+    "sentiment": {
+      "type": "choice",
+      "instructions": "What is the overall sentiment of the text toward its subject?",
+      "criteria": {
+        "positive": "approval, satisfaction, praise, or enthusiasm",
+        "neutral": "factual, mixed, or no clear stance",
+        "negative": "complaint, disappointment, anger, or criticism"
+      }
+    },
+    "actionable": {
+      "type": "yesno",
+      "instructions": "Does the text ask for something to be done or changed?"
+    },
+    "intensity": {
+      "type": "score",
+      "instructions": "How strong is the emotion in the text?",
+      "criteria": ["flat, no emotion", "mild", "strong", "extreme, shouting or threats"]
+    }
+  }
+}
